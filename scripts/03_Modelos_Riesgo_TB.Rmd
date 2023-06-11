@@ -1,0 +1,524 @@
+---
+title: "03_Modelos_Riesgo_TB"
+author: "Paula Sinisterra Sebastián"
+date: "2023-04-11"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Modelos de Riesgo de TB en la CV
+
+```{r}
+# Carga de librerías
+
+library(readr) # Importar documentos
+library(readxl) # Importar documentos
+library(writexl) # Exportar documentos
+library(DCluster) # Modelo Poisson-Gamma
+library(R2WinBUGS) # Modelos Poisson-Lognormal y BYM
+library(gridExtra) # unir mapas
+library(sp) # Elaboración de mapas
+library(RColorBrewer) # Colores mapas
+library(kableExtra) # Elaboración de tablas
+```
+
+```{r}
+# Se cargan los vectores de observados y esperados
+Obs_Muni <- read_excel("../results/Obs_Muni.xlsx")
+Exp_Muni_AS <- read_excel("../results/Exp_Muni_AS.xlsx")
+```
+
+```{r}
+# Se cargan los datos de población de la CV
+load("../data/CupoPobMunis.RData")
+POP <- cubopob[,,3,15:21]
+POPT <- apply(POP,1:2,sum)
+```
+
+```{r}
+# Se carga y ordena la cartografía
+load("../maps/CartoCV.Rdata")
+Carto_Muni <- carto_muni
+Carto_Muni=Carto_Muni[order(Carto_Muni@data$INE_MUN),] 
+ as.data.frame(Carto_Muni)
+```
+
+## Cálculo de la SIR (Razón de Incidencia Estandarizada)
+
+```{r}
+# Cálculo de la SIR 
+SIR_Muni_AS <- 100* Obs_Muni$Freq/Exp_Muni_AS$Freq #Lo hemos centrado en 100
+SIR_Muni_AS <- as.data.frame(SIR_Muni_AS)
+#write_xlsx(SIR_Muni_AS,"../results/SIR_Muni_AS.xlsx" )
+```
+
+```{r}
+# Mapa población 
+
+Pobl_Cutoff <- c(0,100,1000,10000,100000,Inf)
+Pobl_Disc <-cut(apply((POPT/7),1,sum),
+                breaks = Pobl_Cutoff, 
+                include.lowest = TRUE)
+
+Carto_Muni$Pobl_Disc <- Pobl_Disc
+levels(Carto_Muni$Pobl_Disc) <- c("<10^2", "10^2-10^3", "10^3-10^4",
+                                   "10^4-10^5","10^5-Inf")
+
+spplot(Carto_Muni,
+         c("Pobl_Disc"),
+         col.regions = brewer.pal(5,'Oranges'),
+         main = "Población CV",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+
+
+# Mapa SIRs ssplot
+
+SIR_Raw_Cutoff <- c(0,70,80,90,110,120,130,Inf)
+SIR_Raw_Disc <- cut(SIR_Muni_AS$SIR_Muni_AS,
+                    breaks = SIR_Raw_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$SIR_Raw_Disc <- SIR_Raw_Disc
+Carto_Muni$SIR_Muni_AS<- SIR_Muni_AS
+
+spplot(Carto_Muni,
+         c("SIR_Raw_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "SIR",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+
+```
+
+```{r}
+# Varianzas de la estimación de la SIR según 
+# grupo de población
+
+Pob1<- Carto_Muni@data[Pobl_Disc=="[0,100]",]
+Pob2 <- Carto_Muni@data[Pobl_Disc=="(100,1e+03]",]
+Pob12 <- rbind(Pob1,Pob2)
+Pob3 <- Carto_Muni@data[Pobl_Disc=="(1e+03,1e+04]",]
+Pob4 <- Carto_Muni@data[Pobl_Disc=="(1e+04,1e+05]",]
+Pob5 <- Carto_Muni@data[Pobl_Disc=="(1e+05,Inf]",]
+Pob45 <- rbind(Pob4,Pob5)
+
+Varianzas <- c(var(Pob12$SIR_Muni_AS),var(Pob3$SIR_Muni_AS), var(Pob45$SIR_Muni_AS) )
+Grupo_Poblacion <- c("[10-10^3]", "(10^3-10^4]", "(10^4-5-Inf]")
+Varianzas_Df <- data.frame( "Tamaño_Población"=Grupo_Poblacion, "Varianza_SIR"=round(Varianzas,0))
+```
+```{r, include=TRUE, echo=FALSE}
+Varianzas_Df %>%
+kable(booktabs = TRUE,format = "latex",
+caption = "\\label{tabla31} Varianza en el valor de la SIR en los municipios según el tamaño de la población.") %>%
+kable_styling(
+latex_options = c("striped", "condensed","hold_position"),
+position = "center",
+full_width = FALSE)
+```
+
+```{r}
+grid.arrange(spplot(Carto_Muni,
+         c("Pobl_Disc"),
+         col.regions = brewer.pal(5,'Oranges'),
+         main = "Población CV",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),spplot(Carto_Muni,
+         c("SIR_Raw_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "SIR",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))), ncol=2)
+```
+
+## Modelo Poisson-Gamma
+
+```{r}
+# Modelo Poisson-Gamma
+ PoisGamma <- empbaysmooth(Obs=Obs_Muni$Freq,Exp=Exp_Muni_AS$Freq,maxiter=100)
+ PoisGamma_sSMR <- 100*PoisGamma$smthrr
+ 
+ PoisGamma_sSMR <- as.data.frame(PoisGamma_sSMR)
+
+```
+
+```{r}
+# Representación de los riesgos suavizados con el modelo Poisson-Gamma
+
+SMR_PoGa_Cutoff <- c(0,70,80,90,110,120,130,Inf)
+SMR_PoGa_Disc <- cut(PoisGamma_sSMR$PoisGamma_sSMR,
+                    breaks = SMR_PoGa_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$SMR_PoGa_Disc <- SMR_PoGa_Disc
+
+spplot(Carto_Muni,
+         c("SMR_PoGa_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "sR_PoGa",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+```
+
+## Modelo Poisson-LogNormal
+
+```{r}
+# Modelo Poisson-LogNormal
+Model_Po_LogN <- function(){
+  for(i in 1:n){
+ O[i]~dpois(lambda[i])
+ log(lambda[i])<-log(E[i])+log.theta[i]
+ log.theta[i]<-mu+het[i]
+ het[i]~dnorm(0,tau)
+ sSMR[i]<-100*exp(log.theta[i])
+ P.sSMR[i]<-step(sSMR[i]-100)
+} 
+  # Distribuciones previas
+  mu~dflat()
+  tau<-pow(sd.het,-2)
+  sd.het~dunif(0,10)
+   }
+ 
+Datos_Po_LogN <- list(O=Obs_Muni$Freq, 
+                      E=Exp_Muni_AS$Freq, 
+                      n=542)
+Iniciales_Po_LogN <- function() {list(mu=rnorm(1,0,10), 
+                                      sd.het=runif(1), 
+                                      het=rnorm(542,0,0.1))}
+Param <- c("sSMR", "P.sSMR", "sd.het", "mu")
+
+set.seed(611)
+Resul_Po_LogN <- bugs(data=Datos_Po_LogN, 
+                      inits=Iniciales_Po_LogN, 
+                      param=Param, 
+                      model=Model_Po_LogN, 
+                      working.directory = "~/.wine/drive_c/temp/Rtmp", # Comentar este punto si no se ejecuta en Linux
+                      debug=FALSE)
+
+# Comprobación de los criterios
+max(Resul_Po_LogN$summary[1:542,8]) 
+min(Resul_Po_LogN$summary[1:542,9]) 
+
+R_Log_N <- Resul_Po_LogN$summary[1:542,1]
+R_Log_N <- as.data.frame(R_Log_N)
+#write_xlsx(R_Log_N,"../results/R_Log_N.xlsx" )
+
+
+PR_Log_N <- Resul_Po_LogN$summary[543:1084,1]
+PR_Log_N <- as.data.frame(PR_Log_N)
+#write_xlsx(PR_Log_N,"../results/PR_Log_N.xlsx" )
+
+```
+
+```{r}
+# Representación de los riesgos suavizados con el modelo Poisson-LogNormal
+
+SMR_LogN_Cutoff <- c(0,70,80,90,110,120,130,Inf)
+SMR_LogN_Disc <- cut(R_Log_N$R_Log_N,
+                    breaks = SMR_LogN_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$SMR_LogN_Disc <- SMR_LogN_Disc
+
+spplot(Carto_Muni,
+         c("SMR_LogN_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "sR_LogN",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+
+```
+
+## Modelo BYM 
+
+```{r}
+# Estructura de vecindad
+
+Carto_Muni.nb <- poly2nb(Carto_Muni)
+Carto_Muni$ORDEN <- 1:542
+
+# Como las islas dan problemas cuando tenemos 0 casos, se decide unirlas a la 
+# cartografía de forma manual
+
+# Puebla de San Miguel [[477]] la tenemos que unir a Alpuente [[312]]
+# Y Casas Bajas [[364]] lo vamos a unir a Aras de los Olmos [[317]]
+
+Carto_Muni.nb[[477]] <- as.integer(c(277,312))
+Carto_Muni.nb[[312]] <- as.integer(c(317,382, 477, 517, 523, 538))
+
+Carto_Muni.nb[[364]] <- as.integer(c(317,363,528))
+Carto_Muni.nb[[317]] <- as.integer(c(312,364,517,523))
+
+# Tras esto sacamos los vecinos
+Vecinos <- nb2WB(Carto_Muni.nb)
+```
+
+```{r}
+
+# Modelo BYM
+
+Model_DM_3 <- function(){
+
+  # Modelo
+  for(i in 1:n){
+    O[i]~dpois(mu[i])
+    log(mu[i])<-log(E[i])+m+sdhet*het[i]+sdsp*sp[i]
+    het[i]~dnorm(0,1)
+    R[i]<-exp(m+sdhet*het[i]+sp[i]*sdsp)
+}
+
+  # Iniciales
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,10); sdsp~dunif(0,1)
+  
+  # Exceso Riesgo
+  for (i in 1:542){
+  P.R1[i]<-step(R[i]-1)}
+  
+}
+
+Datos_CV <- list(O=Obs_Muni$Freq, 
+                 E=Exp_Muni_AS$Freq, 
+                 adj=Vecinos$adj, 
+                 w=Vecinos$weights, 
+                 num=Vecinos$num, 
+                 n=542)
+
+Iniciales_CV <- function() {list(m=rnorm(1,0,0.1), 
+                                 sdhet=runif(1,0,0.1), 
+                                 sdsp=runif(1,0,0.1), 
+                                 het=rnorm(542), 
+                                 sp=rnorm(542))}
+
+Param <- c("m","sdhet","sdsp","R", "P.R1")
+
+set.seed(345)
+Resul_BYM_DM_3 <- bugs(data=Datos_CV, 
+                       inits=Iniciales_CV, 
+                       param=Param, 
+                       model=Model_DM_3, 
+                       n.iter= 5000, 
+                       n.burnin= 1000, 
+                       working.directory = "~/.wine/drive_c/temp/Rtmp", # Comentar esta línea si no se ejecuta en Linux
+                       debug=FALSE,
+                       DIC=FALSE)
+
+# Comprobación de los criterios
+max(Resul_BYM_DM_3$summary[1:545,8]) 
+min(Resul_BYM_DM_3$summary[1:545,9]) 
+
+Mean_R_BYM <- Resul_BYM_DM_3$summary[3+(1:542),1]
+Mean_R_BYM <- as.data.frame(Mean_R_BYM)
+#write_xlsx(Mean_R_BYM,"../results/Mean_R_BYM.xlsx" )
+
+Mean_PR_BYM <- Resul_BYM_DM_3$summary[3+(543:1084),1]
+Mean_PR_BYM <- as.data.frame(Mean_PR_BYM)
+#write_xlsx(Mean_PR_BYM,"../results/Mean_PR_BYM.xlsx" )
+```
+
+```{r}
+# Representación gráfica
+R_BYM3_Cutoff <- c(0,0.70,0.80,0.9,1.1,1.2,1.3,Inf)
+R_BYM3_Disc <- cut(Mean_R_BYM$Mean_R_BYM,
+                    breaks = R_BYM3_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$R_BYM3_Disc <- R_BYM3_Disc
+
+spplot(Carto_Muni,
+         c("R_BYM3_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "sR_BYM",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+```{r}
+
+# Representación gráfica del exceso de riesgo del modelo BYM
+PR_BYM3_Cutoff <- c(0,0.30,0.50,0.70,0.90,Inf)
+PR_BYM3_Disc <- cut(Mean_PR_BYM$Mean_PR_BYM,
+                    breaks = PR_BYM3_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$PR_BYM3_Disc <- PR_BYM3_Disc
+
+spplot(Carto_Muni,
+         c("PR_BYM3_Disc"),
+         col.regions = brewer.pal(5,'BrBG')[5:1],
+         main = "P(R>1) BYM",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+
+### Análisis de resultados del modelo BYM
+
+```{r}
+
+# Tasas por provincia
+
+Obs_Muni_Alc <- Obs_Muni[1:141,]
+Obs_Muni_Cast <- Obs_Muni[142:276,]
+Obs_Muni_Vlc <- Obs_Muni[277:542,]
+
+Exp_Muni_Alc <- Exp_Muni_AS[1:141,]
+Exp_Muni_Cast <- Exp_Muni_AS[142:276,]
+Exp_Muni_Vlc <- Exp_Muni_AS[277:542,]
+
+(Rate_Alc <- sum(Obs_Muni_Alc$Freq)/sum(Exp_Muni_Alc$Freq)) # 0.8831956
+(Rate_Cast <- sum(Obs_Muni_Cast$Freq)/sum(Exp_Muni_Cast$Freq)) # 1.102173
+(Rate_Vlc <- sum(Obs_Muni_Vlc$Freq)/sum(Exp_Muni_Vlc$Freq)) # 1.061185
+```
+
+```{r}
+# Tablas con los municipios con riesgo superior a 1.3
+
+Mun_R1.3 <- as.data.frame(Carto_Muni)[Mean_R_BYM>1.3,]
+Obs_Mun_R1.3<- Obs_Muni[Mean_R_BYM>1.3,]
+Exp_Mun_R1.3 <- as.data.frame(Exp_Muni_AS[Mean_R_BYM>1.3,])
+Prob_R1.3 <- Mean_R_BYM[Mean_R_BYM>1.3,]
+
+Pob_P <- apply(as.matrix(POPT[Mean_R_BYM>1.3,]),1,sum)
+Pob_P <- as.data.frame (Pob_P)
+Mun_R1.3_PobP7 <- Pob_P$Pob_P/7
+
+Mun_R1.3_Todo <- data.frame("NOMBRE_MUNI" = Mun_R1.3$NOMBRE_MUNI,
+                            "PROV"= Mun_R1.3$ID_PRO,
+                            "OBS" = Obs_Mun_R1.3$Freq, 
+                            "EXP" = round(Exp_Mun_R1.3$Freq,2), 
+                            "POBL"= round(Mun_R1.3_PobP7,0),
+                            "RIESGO"=round(Prob_R1.3,2))
+
+Mun_R1.3_Todo <- Mun_R1.3_Todo[order(Mun_R1.3_Todo$RIESGO, Mun_R1.3_Todo$PROV, Mun_R1.3_Todo$NOMBRE_MUNI), ]
+Mun_R1.3_Todo <- Mun_R1.3_Todo[order(Mun_R1.3_Todo$RIESGO, decreasing = TRUE),]
+Mun_R1.3_Todo <- Mun_R1.3_Todo[,c(1,6,3,4,5)]
+
+#write_xlsx(Mun_R1.3_Todo, "../results/Mun_R1.3_Todo.xlsx")
+
+
+# Municipios con P>0.9 de que el Riesgo>1
+Mun_P90 <- as.data.frame(Carto_Muni)[Mean_PR_BYM>0.9,]
+Mun_P90_Obs<- Obs_Muni[Mean_PR_BYM>0.9,]
+Mun_P90_Exp <- as.data.frame(Exp_Muni_AS[Mean_PR_BYM>0.9,])
+Prob_R.90 <- Mean_PR_BYM[Mean_PR_BYM>0.9,]
+
+PobP90 <- apply(as.matrix(POPT[Mean_PR_BYM>0.9,]),1,sum)
+PobP90 <- as.data.frame (PobP90)
+Pob_P90 <- PobP90$PobP90/7
+
+
+Mun_P90_Todo <- data.frame("NOMBRE_MUNI" = Mun_P90$NOMBRE_MUNI,
+                           "PROV" = Mun_P90$ID_PRO,
+                          "OBS" = Mun_P90_Obs$Freq, 
+                          "EXP" = round(Mun_P90_Exp$Freq,2), 
+                          "POBL"= round(Pob_P90,0),
+                          "PROB.R" = round(Prob_R.90,2))
+
+Mun_P90_Todo[order(Mun_P90_Todo$PROB.R, Mun_P90_Todo$PROV, Mun_P90_Todo$NOMBRE_MUNI), ]
+Mun_P90_Todo <- Mun_P90_Todo[order(Mun_P90_Todo$PROB.R, decreasing = TRUE),]
+Mun_P90_Todo <- Mun_P90_Todo[,c(1,6,3,4,5)]
+
+#write_xlsx(Mun_P90_Todo, "../results/Mun_P90_todo.xlsx")
+
+```
+
+```{r}
+## Datos de Albocàsser
+
+Mun_RAlb <- as.data.frame(Carto_Muni)[Mean_R_BYM>4,]
+Obs_Mun_RAlb<- Obs_Muni[Mean_R_BYM>4,]
+Exp_Mun_RAlb <- as.data.frame(Exp_Muni_AS[Mean_R_BYM>4,])
+
+RAlb <- Mean_R_BYM[Mean_R_BYM>4,]
+Prob_RAlb <- Mean_PR_BYM[Mean_R_BYM>4,]
+
+Pob_P <- sum(POPT[Mean_R_BYM>4,])
+Pob_P <- as.data.frame (Pob_P)
+Mun_R_PobAlb <- Pob_P$Pob_P/7
+
+Mun_R_Alb <- data.frame("NOMBRE_MUNI" = Mun_RAlb$NOMBRE_MUNI,
+                            "OBS" = Obs_Mun_RAlb$Freq, 
+                            "EXP" = Exp_Mun_RAlb$Freq, 
+                            "POBL"= Mun_R_PobAlb,
+                            "RIESGO.TB"=RAlb,
+                            "PROB.R" = Prob_RAlb)
+
+```
+
+```{r}
+## Datos de Muro de Alcoy
+
+Mun_RAlc <- as.data.frame(Carto_Muni)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+Obs_Mun_RAlc <- Obs_Muni[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+Exp_Mun_RAlc <- as.data.frame(Exp_Muni_AS[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",])
+
+RAlc <- Mean_R_BYM[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+Prob_RAlc <- Mean_PR_BYM[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+
+Pob_P <- sum(POPT[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",])
+Pob_P <- as.data.frame (Pob_P)
+Mun_R_PobAlc <- Pob_P$Pob_P/7
+
+Mun_R_Alc <- data.frame("NOMBRE_MUNI" = Mun_RAlc$NOMBRE_MUNI,
+                            "OBS" = Obs_Mun_RAlc$Freq, 
+                            "EXP" = Exp_Mun_RAlc$Freq, 
+                            "POBL"= Mun_R_PobAlc,
+                            "RIESGO.TB"=RAlc,
+                            "PROB.R" = Prob_RAlc)
+
+```
+```{r}
+
+# Picassent
+Mean_R_BYM[Carto_Muni$NOMBRE_MUNI=="Picassent",]
+Obs_Muni[Carto_Muni$NOMBRE_MUNI=="Picassent",]
+(Exp_Muni_AS[Carto_Muni$NOMBRE_MUNI=="Picassent",])
+Mean_PR_BYM[Carto_Muni$NOMBRE_MUNI=="Picassent",]
+
+# Villena
+Mean_R_BYM[Carto_Muni$NOMBRE_MUNI=="Villena",]
+Obs_Muni[Carto_Muni$NOMBRE_MUNI=="Villena",]
+(Exp_Muni_AS[Carto_Muni$NOMBRE_MUNI=="Villena",])
+Mean_PR_BYM[Carto_Muni$NOMBRE_MUNI=="Villena",]
+
+# Albocàsser 
+Mean_R_BYM[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+Obs_Muni[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+(Exp_Muni_AS[Carto_Muni$NOMBRE_MUNI=="Albocàsser",])
+Mean_PR_BYM[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+
+# Alicante 
+Mean_R_BYM[Carto_Muni$NOMBRE_MUNI=="Alicante/Alacant",]
+Obs_Muni[Carto_Muni$NOMBRE_MUNI=="Alicante/Alacant",]
+(Exp_Muni_AS[Carto_Muni$NOMBRE_MUNI=="Alicante/Alacant",])
+Mean_PR_BYM[Carto_Muni$NOMBRE_MUNI=="Alicante/Alacant",]
+
+# Castellón
+Mean_R_BYM[Carto_Muni$NOMBRE_MUNI=="Castellón de la Plana/Castelló de la Plana",]
+Obs_Muni[Carto_Muni$NOMBRE_MUNI=="Castellón de la Plana/Castelló de la Plana",]
+(Exp_Muni_AS[Carto_Muni$NOMBRE_MUNI=="Castellón de la Plana/Castelló de la Plana",])
+Mean_PR_BYM[Carto_Muni$NOMBRE_MUNI=="Castellón de la Plana/Castelló de la Plana",]
+
+```
+```{r}
+Picassent <- as.data.frame(Datos_Bien[Datos_Bien$Prisiones=="Si" & Datos_Bien$Provincia_Declaracion=="VALENCIA",])
+Picassent <- Picassent[,c(6,14,15,17,64)]
+Picassent <- na.omit(Picassent)
+
+
+Castello <- as.data.frame(Datos_Bien[Datos_Bien$Prisiones=="Si" & Datos_Bien$Provincia_Declaracion=="CASTELLON",])
+Castello <- Castello[,c(6,14,15,17,64)]
+Castello <- na.omit(Castello)
+
+Alicante <- as.data.frame(Datos_Bien[Datos_Bien$Prisiones=="Si" & Datos_Bien$Provincia_Declaracion=="ALICANTE",])
+Alicante <- Alicante[,c(6,14,15,17,64)]
+Alicante <- na.omit(Alicante)
+```
+
