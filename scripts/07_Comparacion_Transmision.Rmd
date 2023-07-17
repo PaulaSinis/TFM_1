@@ -1,0 +1,737 @@
+---
+title: "06_Comparacion_Transmision"
+author: "Paula Sinisterra Sebastián"
+date: "2023-04-16"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+# Carga de librerías
+
+library(readr) # Importar documentos
+library(readxl) # Importar documentos
+library(writexl) # Exportar documentos
+library(DCluster) # Modelo Poisson-Gamma
+library(R2WinBUGS) # Modelos BYM
+library(gridExtra) # Unir mapas 
+library(RColorBrewer) # Colores mapas
+library(dplyr)
+library(sp) # Elaborar mapas
+library(vcd) # Índice Kappa
+library(kableExtra) # ELaborar tablas
+```
+
+```{r}
+# Carga de casos de TB observados y esperados
+
+Obs_Muni <- read_excel("../results/Obs_Muni.xlsx")
+Exp_Muni_AS <- read_excel("../results/Exp_Muni_AS.xlsx")
+
+#Obs_Muni_Genom <- read_excel("../results/Obs_Muni_Genom.xlsx")
+#Trans_Muni <- read_excel("../results/Trans_Muni.xlsx")
+```
+
+```{r}
+# Base de datos arreglada
+Datos_Codigos <- read_csv("../data/Datos_Codigos.csv")
+Datos_Codigos <- as.data.frame(Datos_Codigos)
+
+# Casos de TB con información genómica
+
+Datos_Genom <- Datos_Codigos[ !is.na(Datos_Codigos$ID_Genom),]
+Datos_Genom$Ber <- Datos_Genom$Cluster_5snps
+Datos_Genom$Ber[Datos_Genom$Ber=="unique"] <- "NO"
+Datos_Genom$Ber[Datos_Genom$Ber!="NO"] <- "SI"
+
+for (i in 2:76){
+  Datos_Genom[,i]<- as.factor(Datos_Genom[,i])
+}
+```
+
+```{r}
+# Se cargan los datos de población
+
+load("../data/CupoPobMunis.RData")
+POP <- cubopob[,,3,15:21]
+POPT <- apply(POP,1:2,sum)
+
+Todo_Ine <- as.data.frame(rownames(POP))
+colnames(Todo_Ine)[1] <- "INE"
+```
+
+```{r}
+# Se carga la cartografía
+
+load("../maps/CartoCV.Rdata")
+
+Carto_Muni <- carto_muni
+Carto_Muni=Carto_Muni[order(Carto_Muni@data$INE_MUN),] 
+ as.data.frame(Carto_Muni)
+```
+
+```{r}
+# Base de datos info Epi
+# Revisión  y eliminación de NAs
+Datos_Genom$Asociacion_a_Brote <- as.factor(Datos_Genom$Asociacion_a_Brote)
+Datos_Genom[Datos_Genom$Asociacion_a_Brote=="Pendiente" & !is.na(Datos_Genom$Asociacion_a_Brote),]
+
+(Trans_Epi <- Datos_Genom[Datos_Genom$Asociacion_a_Brote=="Pertenece a Brote" & !is.na(Datos_Genom$Asociacion_a_Brote),])
+(No_Trans_Epi <- Datos_Genom[Datos_Genom$Asociacion_a_Brote=="Caso Aislado" & !is.na(Datos_Genom$Asociacion_a_Brote),])
+
+Epi_Muni1 <- rbind(Trans_Epi,No_Trans_Epi)
+```
+
+# Análisis de la concordancia de los datos de transmisión de TB obtenidos mediante epidemiología genómica y estudios de contactos
+
+## Índice Kappa de Cohen
+
+```{r}
+Mod1 <- table(Epi_Muni1$Asociacion_a_Brote, Epi_Muni1$Ber)[c(3,1),c(2,1)]
+Kappa(Mod1)
+```
+
+```{r, include=TRUE, echo=FALSE}
+kable(Mod1, "latex", booktabs = T, caption = "\\label{tabla38} Tabla de contingencia de los casos aislados o pertenecientes a clusters o brotes de transmisión  según la transmisión epidemiológica y la transmisión genómica.") %>%
+kable_styling() %>%
+add_header_above(c(" " = 1,
+" Transmisión Genómica" = 2), bold = TRUE) %>%
+column_spec(1, bold=T,width = "8cm") %>%
+  pack_rows("Transmisión Epidemiológica (DGSP) ", 1, 2)  %>%
+  row_spec( row = 0, bold = TRUE, align = "c")
+```
+
+
+
+# Comparación de las estimaciones de transmisión de TB de los modelos BYM obtenidas a través de las intervenciones epidemiológicas y de la epidemiología genómica
+
+## Modelo BYM binomial para analizar la probabilidad de transmisión genómica de TB añadiendo la probabilidad de disponer de información genómica para los casos de TB como covariable
+
+El modelo se realiza en el script *04_Analisis_Transmision* y cargamos aquí los resultados:
+
+```{r}
+# Resultados del modelo de transmisión de TB con covariable
+P_Cov2 <- read_excel("../results/P_Cov2.xlsx")
+Exceso_Cov2 <- read_excel("../results/Exceso_Cov2.xlsx")
+
+# Resultados de disponer de información genómica para 
+# las muestras de TB 
+P_Genom <- read_excel("../results/P_Genom.xlsx")
+```
+
+## Modelo BYM binomial para analizar la probabilidad de transmisión recogida mediante el método epidemiológico (estudio de contactos)
+
+Para poder comparar los resultados del modelo de transmisión de TB utilizando los datos de epidemiología genómica, fue ajustado un modelo equivalente pero utilizando los datos del estudio de contactos. Aunque se disponía de más datos, se utilizaron únicamente los 1651 individuos que también disponían de información genómica. Por este motivo, como en este caso también se parte desde la submuestra de datos de TB con información genómica asociada, se incluyó de nuevo la probabilidad de disponer de información genómica para los casos de TB como covariable en el modelo para tener su efecto en cuenta.
+
+```{r}
+
+# Revisión  y eliminación de NAs
+Datos_Genom$Asociacion_a_Brote <- as.factor(Datos_Genom$Asociacion_a_Brote)
+Datos_Genom[Datos_Genom$Asociacion_a_Brote=="Pendiente" & !is.na(Datos_Genom$Asociacion_a_Brote),]
+
+(Trans_Epi <- Datos_Genom[Datos_Genom$Asociacion_a_Brote=="Pertenece a Brote" & !is.na(Datos_Genom$Asociacion_a_Brote),])
+(No_Trans_Epi <- Datos_Genom[Datos_Genom$Asociacion_a_Brote=="Caso Aislado" & !is.na(Datos_Genom$Asociacion_a_Brote),])
+
+Epi_Muni1 <- rbind(Trans_Epi,No_Trans_Epi)
+
+# Número de casos de TB en transmisión según la info. epidemiológica
+Trans_Epi <- Trans_Epi[,c(75,16)]
+Trans_Epi <- droplevels(Trans_Epi)
+
+Trans_Epi <- table(Trans_Epi)
+Trans_Epi <- as.data.frame(Trans_Epi)
+
+colnames(Todo_Ine)[1] <- "INE"
+
+Trans_Epi_Muni <- left_join(x = Todo_Ine, y = Trans_Epi, by="INE") 
+Trans_Epi_Muni[is.na(Trans_Epi_Muni)] <- 0
+Trans_Epi_Muni <- Trans_Epi_Muni[,c(1,3)]
+
+colnames(Todo_Ine)[1] <- "Var1"
+
+# Número de casos de TB observados
+Obs_Muni_Epi <- as.data.frame(table(Epi_Muni1$INE))
+Obs_Muni_Epi <- left_join(x = Todo_Ine, y = Obs_Muni_Epi , by="Var1") 
+Obs_Muni_Epi[is.na(Obs_Muni_Epi)] <- 0
+
+colnames(Obs_Muni_Epi)[1] <- "INE"
+
+Df_Trans_Genom <- merge(Trans_Epi_Muni,Obs_Muni_Epi, by="INE")
+
+colnames(Df_Trans_Genom)[2] <- "Transmisiones"
+colnames(Df_Trans_Genom)[3] <- "Casos"
+
+```
+
+```{r}
+# Riesgo global de TB según info. epidemiológica
+Riesgo_CV_Epi <- (sum(Trans_Epi_Muni$Freq)/sum(Obs_Muni_Epi$Freq))
+
+# Vector con los municipios donde hay algún caso de TB
+Este_Si_Epi <- which(Obs_Muni_Epi$Freq>0)
+```
+
+```{r}
+# Cargamos cartografía
+load("../maps/CartoCV.Rdata")
+
+# Ordenamos por código de municipio
+names(Trans_Epi_Muni)[1] <- "INE_MUN"
+Carto_Muni <- carto_muni[order(carto_muni@data$INE_MUN),] 
+
+# Estructura de vecindad
+Carto_Muni.nb <- poly2nb(Carto_Muni)
+Carto_Muni$ORDEN <- 1:542
+
+
+# Unión "islas"
+Carto_Muni.nb[[477]] <- as.integer(c(277,312))
+Carto_Muni.nb[[312]] <- as.integer(c(317,382, 477, 517, 523, 538))
+
+Carto_Muni.nb[[364]] <- as.integer(c(317,363,528))
+Carto_Muni.nb[[317]] <- as.integer(c(312,364,517,523))
+
+# Tras esto sacamos los vecinos
+Vecinos <- nb2WB(Carto_Muni.nb)
+```
+
+```{r, include=TRUE}
+
+# Modelo con info epidemiológica + covariable
+
+Binom_BYM_Epi_Cov <- function(){ 
+  for (i in 1:nObs){
+    Trans[Estesi[i]] ~ dbin(p[Estesi[i]], Obs[Estesi[i]])
+    logit(p[Estesi[i]]) <- m+het[Estesi[i]]*sdhet+sp[Estesi[i]]*sdsp+ beta1*Var1[Estesi[i]]
+  }
+
+
+  for (i in 1:n) {
+    het[i]~dnorm(0,1)
+    P[i]<-exp(m+het[i]*sdhet+sp[i]*sdsp)/(1+exp(m+het[i]*sdhet+sp[i]*sdsp))
+    Pexceso[i] <- step(het[i]*sdhet+sp[i]*sdsp)
+  }
+  
+  # Iniciales
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,10); sdsp~dunif(0,1)
+  beta1 ~ dnorm(0,1)
+  
+  # Asociación covariable
+   Pbeta1<-step(beta1-1)
+}
+
+Datos_CV_Epi <- list(Obs = Obs_Muni_Epi$Freq, 
+                       Trans = Trans_Epi_Muni$Freq, 
+                       adj = Vecinos$adj, 
+                       w = Vecinos$weights, 
+                       num = Vecinos$num, 
+                       Estesi = Este_Si_Epi, 
+                       nObs=length(Este_Si_Epi), 
+                     Var1 = c(P_Genom$P_Genom),
+                       n=542)
+
+Iniciales_CV <- function() {
+  list(m = rnorm(1,0,0.1),
+       sdhet = runif(1,0,0.1),
+       sdsp = runif(1,0,0.1),
+       het = rnorm(542), 
+       sp = rnorm(542),
+       beta1 = rnorm(1))
+  }
+Param <- c("m","sdhet","sdsp","beta1","Pbeta1", "P", "Pexceso")
+
+set.seed(233) 
+Resul_BYM_Epi_Cov <- bugs(data = Datos_CV_Epi, 
+                        inits = Iniciales_CV, 
+                        param = Param, 
+                        model = Binom_BYM_Epi_Cov, 
+                        n.iter = 10000, 
+                        n.burnin = 2000, 
+                        working.directory = "~/.wine/drive_c/temp/Rtmp",  # Comentar esta línea si no se ejecuta en Linux
+                        debug = FALSE,
+                        DIC = FALSE)
+# Comprobación de los criterios de validación
+max(Resul_BYM_Epi_Cov$summary[1:204,8]) 
+min(Resul_BYM_Epi_Cov$summary[1:204,9]) 
+
+# Resumen de los resultados del modelo
+Resul_BYM_Epi_Cov$summary[1:5, ]
+```
+
+```{r, include=TRUE}
+P_Epi_Cov <- Resul_BYM_Epi_Cov$mean$P
+P_Epi_Cov <- as.data.frame(P_Epi_Cov)
+#write_xlsx(P_Epi_Cov,"../results/P_Epi_Cov.xlsx" )
+
+P_Exceso_Epi_Cov <- Resul_BYM_Epi_Cov$mean$Pexceso
+P_Exceso_Epi_Cov <- as.data.frame(P_Exceso_Epi_Cov)
+#write_xlsx(P_Exceso_Epi_Cov,"../results/P_Exceso_Epi_Cov.xlsx")
+```
+
+```{r}
+P_Epi_Cov_Cutoff <-  quantile(P_Epi_Cov$P_Epi_Cov,(0:7)/7)
+P_Epi_Cov_Disc <- cut(P_Epi_Cov$P_Epi_Cov,
+                    breaks = P_Epi_Cov_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$P_Epi_Cov_Disc <- P_Epi_Cov_Disc
+
+P_Exceso_Epi_Cov_Cutoff <-quantile(P_Exceso_Epi_Cov$P_Exceso_Epi_Cov,(0:7)/7)
+P_Exceso_Epi_Cov_Disc <- cut(P_Exceso_Epi_Cov$P_Exceso_Epi_Cov,
+                    breaks = P_Exceso_Epi_Cov_Cutoff,
+                     include.lowest = TRUE)
+
+
+Carto_Muni$P_Exceso_Epi_Cov_Disc <- P_Exceso_Epi_Cov_Disc
+
+grid.arrange(spplot(Carto_Muni,
+         c("P_Epi_Cov_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = " P. Transmisión (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         spplot(Carto_Muni,
+         c("P_Exceso_Epi_Cov_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = " P. Exceso Transmisión (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         ncol=2)
+```
+
+```{r, include=TRUE, echo=FALSE}
+
+P_Cov2_Cutoff <-quantile(P_Cov2$P_Cov2,(0:7)/7)
+P_Cov2_Disc <- cut(P_Cov2$P_Cov2,
+                    breaks = P_Cov2_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$P_Cov2_Disc <- P_Cov2_Disc
+
+grid.arrange(spplot(Carto_Muni,
+         c("P_Cov2_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión (Genómica)",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         spplot(Carto_Muni,
+         c("P_Epi_Cov_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         ncol=2)
+```
+
+```{r}
+
+# Municipios con P de transmisión > 0.35
+
+P_Epi_P.35 <- as.data.frame(Carto_Muni)[P_Epi_Cov$P_Epi_Cov>0.35,]
+Prob_Trans_p.35 <- as.data.frame(P_Epi_Cov)[P_Epi_Cov$P_Epi_Cov>0.35,]
+
+Mun_P.35_Epi<- data.frame("NOMBRE_MUNI" = P_Epi_P.35$NOMBRE_MUNI,
+                            "PROB.TRANS" = Prob_Trans_p.35 )
+
+
+# Municipios con P de exceso de transmisión > 0.90
+
+Exceso_P90_Epi <- as.data.frame(Carto_Muni)[P_Exceso_Epi_Cov$P_Exceso_Epi_Cov>0.90,]
+Prob_Exceso_p.90 <- as.data.frame(P_Exceso_Epi_Cov)[P_Exceso_Epi_Cov$P_Exceso_Epi_Cov>0.90,]
+
+Mun_P.90_Exceso_Epi<- data.frame("NOMBRE_MUNI" = Exceso_P90_Epi$NOMBRE_MUNI,
+                            "PROB.TRANS" = Prob_Exceso_p.90 )
+
+```
+
+```{r}
+cor(P_Cov2$P_Cov2, P_Epi_Cov)
+cor(Exceso_Cov2$Exceso_Cov2, P_Exceso_Epi_Cov)
+```
+
+
+
+# Análisis de transmisión de la tuberculosis según la información recogida en las intervenciones epidemiológicas
+
+```{r}
+
+# Revisión  y eliminación de NAs
+colSums(is.na(Datos_Codigos))
+which(is.na(Datos_Codigos$Asociacion_a_Brote))
+
+Estos <- as.vector(which(is.na(Datos_Codigos$Asociacion_a_Brote)))
+Datos_Codigos[Estos,]
+Datos_Codigos_Epi <- Datos_Codigos[-Estos,]
+
+colSums(is.na(Datos_Codigos_Epi))
+
+No_Trans <- (Datos_Codigos_Epi[Datos_Codigos_Epi$Asociacion_a_Brote=="Caso Aislado",])
+Trans <- (Datos_Codigos_Epi[Datos_Codigos_Epi$Asociacion_a_Brote=="Pertenece a Brote",])
+
+Trans_Epi_Todo1 <- rbind(No_Trans, Trans)
+```
+
+El objetivo es sacar un modelo BYM binomial para conocer la probabilidad de transmisión según la clasificación epidemiológica. Tenemos, por tanto:
+
+$$ Trans_i \sim  Binom (p_i,Obs_i) , \ i=1,..I $$
+
+donde $Trans_i$ hace referencia al número de casos de TB dentro de un brote según la información de las intervenciones epidemiológicas, $p_i$ es la probabilidad de transmisión de TB según la información de las intervenciones epidemiológicas en cada municipio y $Obs_i$ es el número de casos totales de TB en cada municipio. 
+
+```{r}
+
+# Preparación del vector de casos de TB en transmisión
+# por municipio
+
+Trans <- Trans[,c(75,16)]
+Trans <- droplevels(Trans)
+
+Trans_Todo <- table(Trans)
+Trans_Todo <- as.data.frame(Trans_Todo)
+
+colnames(Todo_Ine)[1] <- "INE"
+
+Trans_Epi_Global <- left_join(x = Todo_Ine, y = Trans_Todo, by="INE") 
+Trans_Epi_Global[is.na(Trans_Epi_Global)] <- 0
+Trans_Epi_Global <- Trans_Epi_Global[,c(1,3)]
+
+
+# Preparación del vector Trans_Muni
+# se utiliza la base de datos Datos_Codigos_Epi para excluir a los NAs 
+
+colnames(Todo_Ine)[1] <- "Var1"
+
+Obs_Epi_Global <- as.data.frame(table(Datos_Codigos_Epi$INE))
+Obs_Epi_Global <- left_join(x = Todo_Ine, y = Obs_Epi_Global , by="Var1") 
+Obs_Epi_Global  [is.na(Obs_Epi_Global)] <- 0
+colnames(Obs_Epi_Global )[1] <- "INE"
+
+# Se crea un data.frame con los casos de TB observados y los que están
+# en transmisión en cada uno de esos municipios
+Df_Trans_Todo <- merge(Trans_Epi_Global,Obs_Epi_Global , by="INE")
+
+colnames(Df_Trans_Todo)[2] <- "Transmisiones"
+colnames(Df_Trans_Todo)[3] <- "Casos"
+```
+
+```{r, include=TRUE}
+# Transmisión global de TB con todos los datos
+# de estudios de contactos
+
+Riesgo_Epi_Todo <- (sum(Trans_Epi_Global$Freq)/sum(Obs_Epi_Global$Freq))
+
+# Municipios con casos de TB 
+Este_Si_Epi_Todo <- which(Obs_Epi_Global$Freq>0)
+
+# Modelo 
+
+Trans_Epi_BYM <- function(){ 
+  for (i in 1:nObs){
+    Trans[Estesi[i]] ~ dbin(p[Estesi[i]], Obs[Estesi[i]])
+    logit(p[Estesi[i]]) <- m+het[Estesi[i]]*sdhet+sp[Estesi[i]]*sdsp
+    
+  }
+  
+
+  for (i in 1:n) {
+    het[i]~dnorm(0,1)
+    P[i]<-exp(m+het[i]*sdhet+sp[i]*sdsp)/(1+exp(m+het[i]*sdhet+sp[i]*sdsp))
+    Pexceso[i] <- step(het[i]*sdhet+sp[i]*sdsp)
+  }
+  
+  # Iniciales
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,10); sdsp~dunif(0,1)
+  
+}
+
+Datos_Trans_Epi <- list(Obs = Obs_Epi_Global$Freq, 
+                       Trans = Trans_Epi_Global$Freq, 
+                       adj = Vecinos$adj, 
+                       w = Vecinos$weights, 
+                       num = Vecinos$num, 
+                       Estesi = Este_Si_Epi_Todo, 
+                       nObs=length(Este_Si_Epi_Todo), 
+                       n=542)
+
+Iniciales_CV <- function() {
+  list(m = rnorm(1,0,0.1),
+       sdhet = runif(1,0,0.1),
+       sdsp = runif(1,0,0.1),
+       het = rnorm(542), 
+       sp = rnorm(542))
+}
+
+Param <- c("m","sdhet","sdsp","P", "Pexceso")
+
+set.seed(611) 
+Resul_Trans_Epi_BYM <- bugs(data = Datos_Trans_Epi, 
+                        inits = Iniciales_CV, 
+                        param = Param, 
+                        model = Trans_Epi_BYM, 
+                        n.iter = 10000, 
+                        n.burnin = 2000, 
+                        working.directory = "~/.wine/drive_c/temp/Rtmp", # Comentar esta línea si no se ejecuta en Linux
+                        debug = FALSE,
+                        DIC = FALSE)
+
+# Comprobación de los criterios de validación
+max(Resul_Trans_Epi_BYM$summary[1:545,8]) 
+min(Resul_Trans_Epi_BYM$summary[1:545,9]) 
+
+P_Epi_Todo <- Resul_Trans_Epi_BYM$mean$P
+P_Epi_Todo <- as.data.frame(P_Epi_Todo)
+#write_xlsx(P_Epi_Todo,"../results/P_Epi_Todo.xlsx" )
+
+P_Exceso_Epi_Todo <- Resul_Trans_Epi_BYM$mean$Pexceso
+P_Exceso_Epi_Todo <- as.data.frame(P_Exceso_Epi_Todo)
+#write_xlsx(P_Exceso_Epi_Todo,"../results/P_Exceso_Epi_Todo.xlsx" )
+
+# Resumen resultados del modelo
+Resul_Trans_Epi_BYM <- as.data.frame(round(Resul_Trans_Epi_BYM$summary[1:3,],2)) 
+#write_xlsx(Resul_Trans_Epi_BYM,"../results/Resul_Trans_Epi_BYM.xlsx" )
+
+Resul_Trans_Epi_BYM <- as.data.frame(Resul_Trans_Epi_BYM)
+rownames(Resul_Trans_Epi_BYM)[1] <- "m"
+rownames(Resul_Trans_Epi_BYM)[2] <- "sdhet"
+rownames(Resul_Trans_Epi_BYM)[3] <- "sdsp"
+```
+
+```{r, include=TRUE, echo=FALSE}
+Resul_Trans_Epi_BYM %>%
+kable(booktabs = TRUE,format = "latex",
+caption = "\\label{tabla391} Resumen de los resultados obtenidos para los parámetros del modelo BYM de transmisión utilizando los datos de transmisión de TB obtenidos a través de intervenciones epidemiológicas (estudio de contactos).") %>%
+kable_styling(
+latex_options = c("striped", "condensed","hold_position"),
+position = "center",
+full_width = FALSE)
+
+```
+
+
+```{r, include=TRUE, echo=FALSE}
+### Mapa con intervalos por cuantiles
+
+P_Epi_Todo_Cutoff <- quantile(P_Epi_Todo$P_Epi_Todo,(0:7)/7)
+P_Epi_Todo_Disc <- cut(P_Epi_Todo$P_Epi_Todo,
+                    breaks = P_Epi_Todo_Cutoff,
+                     include.lowest = TRUE,
+                    right = TRUE)
+
+Carto_Muni$P_Epi_Todo_Disc <- P_Epi_Todo_Disc
+
+spplot(Carto_Muni,
+         c("P_Epi_Todo_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión Global (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+P_Exceso_Epi_Todo_Cutoff <- quantile(P_Exceso_Epi_Todo$P_Exceso_Epi_Todo,(0:7)/7)
+P_Exceso_Epi_Todo_Disc <- cut(P_Exceso_Epi_Todo$P_Exceso_Epi_Todo,
+                    breaks = P_Exceso_Epi_Todo_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$P_Exceso_Epi_Todo_Disc <- P_Exceso_Epi_Todo_Disc
+
+spplot(Carto_Muni,
+         c("P_Exceso_Epi_Todo_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Exceso Transmisión Global (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+```
+
+
+```{r}
+### Mapa con intervalos fijos
+
+P_Epi_Todo_Cutoff <-  c(0,0.04,0.08,0.12,0.16,0.20,0.24,0.5)
+P_Epi_Todo_Disc <- cut(P_Epi_Todo$P_Epi_Todo,
+                    breaks = P_Epi_Todo_Cutoff,
+                     include.lowest = TRUE,
+                    right = TRUE)
+
+Carto_Muni$P_Epi_Todo_Disc <- P_Epi_Todo_Disc
+
+spplot(Carto_Muni,
+         c("P_Epi_Todo_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión Global (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+P_Exceso_Epi_Todo_Cutoff <-  c((0:7)/7)
+P_Exceso_Epi_Todo_Disc <- cut(P_Exceso_Epi_Todo$P_Exceso_Epi_Todo,
+                    breaks = P_Exceso_Epi_Todo_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$P_Exceso_Epi_Todo_Disc <- P_Exceso_Epi_Todo_Disc
+
+spplot(Carto_Muni,
+         c("P_Exceso_Epi_Todo_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Exceso Transmisión Global (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+```
+```{r, include=TRUE, echo=FALSE}
+spplot(Carto_Muni,
+         c("P_Epi_Todo_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión Global (Epidemiología)",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+
+
+```{r}
+
+# Municipios con P de transmisión de TB > 0.30
+
+P_Epi_Todo_P.30 <- as.data.frame(Carto_Muni)[P_Epi_Todo$P_Epi_Todo>0.30,]
+Prob_Trans_p.30 <- as.data.frame(P_Epi_Todo)[P_Epi_Todo$P_Epi_Todo>0.30,]
+
+Mun_P.35_Epi<- data.frame("NOMBRE_MUNI" = P_Epi_Todo_P.30$NOMBRE_MUNI,
+                          "PROV" = P_Epi_Todo_P.30$ID_PRO,
+                            "PROB.TRANS" = round(Prob_Trans_p.30,3) )
+Mun_P.35_Epi <- Mun_P.35_Epi[order(Mun_P.35_Epi$PROB.TRANS, Mun_P.35_Epi$PROV, Mun_P.35_Epi$NOMBRE_MUNI),]
+Mun_P.35_Epi <- Mun_P.35_Epi[order(Mun_P.35_Epi$PROB.TRANS, decreasing = TRUE), ]
+
+rownames(Mun_P.35_Epi) <- NULL
+Mun_P.35_Epi <- Mun_P.35_Epi[,c(1,3)]
+#write_xlsx(Mun_P.35_Epi, "../results/Mun_P.35_Epi.xlsx")
+
+# Municipios con P de exceso de transmisión > 0.95
+Exceso_P95_Epi <- as.data.frame(Carto_Muni)[P_Exceso_Epi_Todo$P_Exceso_Epi_Todo>0.95,]
+Prob_Exceso_p.95 <- as.data.frame(P_Exceso_Epi_Todo)[P_Exceso_Epi_Todo$P_Exceso_Epi_Todo>0.95,]
+
+Mun_P.95_Exceso_Epi<- data.frame("NOMBRE_MUNI" = Exceso_P95_Epi$NOMBRE_MUNI,
+                                 "PROV"= Exceso_P95_Epi$ID_PRO,
+                            "PROB.TRANS" = round(Prob_Exceso_p.95,3))
+Mun_P.95_Exceso_Epi <- Mun_P.95_Exceso_Epi[order(Mun_P.95_Exceso_Epi$PROB.TRANS, Mun_P.95_Exceso_Epi$PROV, Mun_P.95_Exceso_Epi$NOMBRE_MUNI),]
+Mun_P.95_Exceso_Epi <- Mun_P.95_Exceso_Epi[order(Mun_P.95_Exceso_Epi$PROB.TRANS, decreasing = TRUE), ]
+
+rownames(Mun_P.95_Exceso_Epi) <- NULL
+Mun_P.95_Exceso_Epi <- Mun_P.95_Exceso_Epi[,c(1,3)]
+
+#write_xlsx(Mun_P.95_Exceso_Epi, "../results/Mun_P.95_Exceso_Epi.xlsx")
+```
+
+
+
+
+## Comparación de la importancia del patrón espacial en los modelos de transmisión de TB 
+
+
+```{r, include=TRUE, echo=FALSE}
+Resul_Trans_Epi_BYM %>%
+kable(booktabs = TRUE,format = "latex",
+caption = "\\label{tabla391} Resumen de los resultados obtenidos para los parámetros del modelo BYM de transmisión utilizando los datos de transmisión de TB obtenidos a través de intervenciones epidemiológicas (estudio de contactos).") %>%
+kable_styling(
+latex_options = c("striped", "condensed","hold_position"),
+position = "center",
+full_width = FALSE)
+
+```
+
+```{r}
+Resultados_BYM_Covariable <- read_excel("../results/Resultados_BYM_Cov2.xlsx")
+Resultados_BYM_Covariable <- as.data.frame(Resultados_BYM_Covariable)
+rownames(Resultados_BYM_Covariable)[1] <- "m"
+rownames(Resultados_BYM_Covariable)[2] <- "sdhet"
+rownames(Resultados_BYM_Covariable)[3] <- "sdsp"
+rownames(Resultados_BYM_Covariable)[4] <- "beta1"
+rownames(Resultados_BYM_Covariable)[5] <- "Pbeta1"
+```
+
+
+```{r, include=TRUE, echo=FALSE}
+Resultados_BYM_Covariable %>%
+kable(booktabs = TRUE,format = "latex",
+caption = "\\label{tabla36} Resumen de los resultados obtenidos para los parámetros del modelo BYM de transmisión con covariable.") %>%
+kable_styling(
+latex_options = c("striped", "condensed","hold_position"),
+position = "center",
+full_width = FALSE)
+
+```
+
+## Información concreta de riesgo y transmisión de TB en Albocàsser y Muro de Alcoy
+
+```{r}
+Obs_Muni_Genom <- read_excel("../results/Obs_Muni_Genom.xlsx")
+Trans_Muni <- read_excel("../results/Trans_Muni.xlsx")
+```
+
+
+```{r}
+
+# Albocàsser
+Nombre <- as.data.frame(Carto_Muni)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+
+Obs_Muni_Alb <- Obs_Muni_Genom[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+Trans_Muni_Alb <-  as.data.frame(Trans_Muni[Carto_Muni$NOMBRE_MUNI=="Albocàsser",])
+PTrans_Genom_Cov <- as.data.frame(P_Cov2)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+PExceso_Genom_Cov <- as.data.frame(Exceso_Cov2)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+PTrans_Epi_Cov <- as.data.frame(P_Epi_Cov)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+PExceso_Epi_Cov <- as.data.frame(P_Exceso_Epi_Cov)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+PTrans_Epi_Todo <- as.data.frame(P_Epi_Todo)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+PExceso_Epi_Todo <- as.data.frame(P_Exceso_Epi_Todo)[Carto_Muni$NOMBRE_MUNI=="Albocàsser",]
+
+
+Pob_P <- sum(POPT[Carto_Muni$NOMBRE_MUNI=="Albocàsser",])
+Pob_P <- as.data.frame (Pob_P)
+Mun_Alb_PobP7 <- Pob_P$Pob_P/7
+
+Trans_Albocasser <- data.frame("NOMBRE_MUNI" = Nombre$NOMBRE_MUNI,
+                            "OBS.GENOM" = Obs_Muni_Alb$Freq, 
+                            "TRANS" = Trans_Muni_Alb$Freq,
+                            "PROB.TRANS.GENOM" = PTrans_Genom_Cov,
+                            "P.EXC.GENOM" = PExceso_Genom_Cov,
+                            "PROB.EPI.COV" = PTrans_Epi_Cov, 
+                            "P.EXC.EPI.COV"= PExceso_Epi_Cov,
+                            "PROB.EPI.TODO"= PTrans_Epi_Todo,
+                            "P.EXC.EPI.TODO"= PExceso_Epi_Todo,
+                            "POBL"= Mun_Alb_PobP7 )
+```
+
+```{r}
+## Muro de Alcoy
+
+Nombre <- as.data.frame(Carto_Muni)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+
+Obs_Muni_MAlc <- Obs_Muni_Genom[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+Trans_Muni_MAlc <-  as.data.frame(Trans_Muni[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",])
+PTrans_Genom_Cov <- as.data.frame(P_Cov2)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+PExceso_Genom_Cov <- as.data.frame(Exceso_Cov2)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+PTrans_Epi_Cov <- as.data.frame(P_Epi_Cov)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+PExceso_Epi_Cov <- as.data.frame(P_Exceso_Epi_Cov)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+PTrans_Epi_Todo <- as.data.frame(P_Epi_Todo)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+PExceso_Epi_Todo <- as.data.frame(P_Exceso_Epi_Todo)[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",]
+
+
+Pob_P <- sum(POPT[Carto_Muni$NOMBRE_MUNI=="Muro de Alcoy",])
+Pob_P <- as.data.frame (Pob_P)
+Mun_Alb_PobP7 <- Pob_P$Pob_P/7
+
+Trans_MuroAlcoy <- data.frame("NOMBRE_MUNI" = Nombre$NOMBRE_MUNI,
+                            "OBS.GENOM" = Obs_Muni_MAlc$Freq, 
+                            "TRANS" = Trans_Muni_MAlc$Freq,
+                            "PROB.TRANS.GENOM" = PTrans_Genom_Cov,
+                            "P.EXC.GENOM" = PExceso_Genom_Cov,
+                            "PROB.EPI.COV" = PTrans_Epi_Cov, 
+                            "P.EXC.EPI.COV"= PExceso_Epi_Cov,
+                            "PROB.EPI.TODO"= PTrans_Epi_Todo,
+                            "P.EXC.EPI.TODO"= PExceso_Epi_Todo,
+                            "POBL"= Mun_Alb_PobP7 )
+```

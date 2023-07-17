@@ -1,0 +1,816 @@
+---
+title: "04_Analisis_Transmision"
+author: "Paula Sinisterra Sebastián"
+date: "2023-04-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Carga de librerías
+
+library(readr) # Importar documentos
+library(readxl) # Importar documentos
+library(writexl) # Exportar documentos
+library(R2WinBUGS) # Modelos BYM
+library(gridExtra) # Unir mapas 
+library(dplyr)
+library(sp) # Mapas
+library(spdep) # Relación de vecindad
+library(RColorBrewer) # Color mapas
+```
+# Estudio de la transmisión de TB utilizando los datos aportados por la epidemiología genómica
+
+## Carga de información anterior necesaria
+
+```{r}
+# Vectores de casos de TB observados y esperados
+Obs_Muni <- read_excel("../results/Obs_Muni.xlsx")
+Exp_Muni_AS <- read_excel("../results/Exp_Muni_AS.xlsx")
+```
+
+```{r}
+# Base de datos con códigos
+Datos_Codigos <- read_csv("../data/Datos_Codigos.csv")
+Datos_Codigos <- as.data.frame(Datos_Codigos)
+```
+
+```{r}
+# Cálculo de la SIR 
+SMR_Muni_AS<- 100* Obs_Muni$Freq/Exp_Muni_AS$Freq # centrado en 100
+```
+
+```{r}
+# Datos de población de CV
+load("../data/CupoPobMunis.RData")
+POP <- cubopob[,,3,15:21]
+POPT <- apply(POP,1:2,sum)
+```
+
+```{r}
+# Cartografía
+load("../maps/CartoCV.Rdata")
+Carto_Muni <- carto_muni
+Carto_Muni=Carto_Muni[order(Carto_Muni@data$INE_MUN),] 
+ as.data.frame(Carto_Muni)
+```
+## Obtención de los casos de TB con información genómica
+
+Lo primero que se hace es ver cuántos individuos llevan asociada información genómica y crear una nueva variable (*Ber*) binaria codificada con 0 para la ausencia y 1 para la presencia de transmisión. 
+
+```{r}
+# Hay 1400 datos que no tienen muestra genómica
+Faltantes_Genom <- Datos_Codigos[!is.na(Datos_Codigos$F_Declaracion) & is.na(Datos_Codigos$ID_Genom),]
+
+# Sacamos un data.frame con los datos genómicos
+Datos_Genom <- Datos_Codigos[ !is.na(Datos_Codigos$ID_Genom),]
+
+Datos_Genom$Ber <- Datos_Genom$Cluster_5snps
+Datos_Genom$Ber[Datos_Genom$Ber=="unique"] <- "NO"
+Datos_Genom$Ber[Datos_Genom$Ber!="NO"] <- "SI"
+
+ # No hay NAs para Municipio_Residencia
+ which(is.na(Datos_Genom$Municipio_Residencia))
+
+```
+
+```{r, eval=FALSE}
+# Breve análisis exploratorio
+
+for (i in 2:76){
+  Datos_Genom[,i]<- as.factor(Datos_Genom[,i])
+}
+
+par(mfrow=c(2,2))
+for (i in 3:76){
+  plot(Datos_Genom[,i], main=paste("Casos TB por", names(Datos_Genom[i])))
+}
+```
+
+
+## Muestra de casos de TB con información genómica asociada y modelos de riesgo de TB con datos genómicos
+
+### Modelo SIR
+
+```{r}
+## Obtención de Número de casos Observados en cada municipio con información genómica
+
+# Como recordatorio: usamos la base de datos GENÓMICOS
+
+colSums(is.na(Datos_Genom))# No hay datos NA 
+
+Obs_Muni_Genom <- as.data.frame(table(Datos_Genom$INE))
+Todo_Ine <- as.data.frame(rownames(POP))
+colnames(Todo_Ine)[1] <- "Var1"
+
+Obs_Muni_Genom <- left_join(x = Todo_Ine, y = Obs_Muni_Genom,by="Var1") 
+Obs_Muni_Genom [is.na(Obs_Muni_Genom)] <- 0
+
+#write_xlsx(Obs_Muni_Genom,"../results/Obs_Muni_Genom.xlsx" )
+
+```
+
+```{r}
+## Cálculo de las tasas de la CV
+
+POP1 <- cubopob[,,1,15:21]
+POPT.1 <- apply(POP1,1:2,sum) 
+
+
+POP2 <- cubopob[,,2,15:21]
+POPT.2 <- apply(POP2,1:2,sum) 
+# Esta matriz lo que contiene son el número de personas año en cada casilla 
+# para uno de los sexos.  
+
+Obs_Age_Sex_Genom<- as.matrix(table( Datos_Genom$Sexo,Datos_Genom$Grupo_Edad)) 
+
+
+# tasa para cada edad y para cada sexo
+
+Age_Sex_1 <- apply(POPT.1,2,sum) 
+Age_Sex_2 <- apply(POPT.2,2,sum) 
+
+CV_Age_Sex <- as.data.frame(Age_Sex_1)
+CV_Age_Sex$Age_Sex_2 <- Age_Sex_2
+
+CV_Age_Sex_t <- as.matrix(t(CV_Age_Sex))
+Rates_AS_Genom <- Obs_Age_Sex_Genom/CV_Age_Sex_t # Son tasas-año porque están calculadas con POPT.1 y POPT.2
+```
+
+```{r}
+## Cálculo de los nuevos casos esperados en cada municipio (E_i)
+
+# Casos esperados para cada rango de edad en Sexo1
+Rates_1 <- as.matrix(t(Rates_AS_Genom))[,1] 
+Exp_Age_Genom_1 <- as.vector(POPT.1 %*% Rates_1) 
+
+# Casos esperados para cada rango de edad en Sexo6
+
+Rates_2<- as.matrix(t(Rates_AS_Genom))[,2]
+Exp_Age_Genom_2 <- as.vector(POPT.2 %*% Rates_2) 
+
+# Se suman los casos de ambos sexos:
+Exp_Age_Sex_Genom <- data.frame("1"=Exp_Age_Genom_1 , "2"=Exp_Age_Genom_2)
+Exp_Age_Sex_Genom <- as.matrix(Exp_Age_Sex_Genom)
+
+Exp_Muni_AS_Genom <- apply(Exp_Age_Sex_Genom,1,sum)
+Exp_Muni_AS_Genom  <- as.data.frame(Exp_Muni_AS_Genom)
+POPT.1 <- as.data.frame(POPT.1)
+
+
+Exp_Muni_AS_Genom$Var1<- rownames(POPT.1)
+colnames(Exp_Muni_AS_Genom)[2] <- "Freq"
+
+Exp_Muni_AS_Genom <- Exp_Muni_AS_Genom [ , rev(order(c(names(Exp_Muni_AS_Genom))))]
+```
+
+```{r}
+# Cálculo de la SIR 
+
+SIR_Muni_AS_Genom <- 100* Obs_Muni_Genom$Freq/Exp_Muni_AS_Genom$Exp_Muni_AS_Genom #Centrado en 100
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+# Mapa de riesgos de TB utilizando solo la información genómica
+
+SMR_Raw_Genom_Cutoff <- c(0,70,80,90,110,120,130,Inf)
+SMR_Raw_Genom_Disc <- cut(SIR_Muni_AS_Genom,
+                    breaks = SMR_Raw_Genom_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$SMR_Raw_Genom_Disc<- SMR_Raw_Genom_Disc
+
+spplot(Carto_Muni,
+         c("SMR_Raw_Genom_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "SIR_Genom",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+
+```{r}
+# SIR obtenida con todos los datos (no solo los genómicos)
+SIR_Muni_AS <- read_excel("../results/SIR_Muni_AS.xlsx")
+```
+
+```{r}
+## Mapa comparativo entre las estimaciones de la SIR obtenidas con todos los casos de TB 
+# y las estimaciones de la SIR obtenidas con los casos de TB con información genómica
+
+SMR_Raw_Cutoff <- c(0,70,80,90,110,120,130,Inf)
+SMR_Raw_Disc <- cut(SIR_Muni_AS$SIR_Muni_AS,
+                    breaks = SMR_Raw_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$SMR_Raw_Disc <- SMR_Raw_Disc
+grid.arrange(spplot(Carto_Muni,
+                     c("SMR_Raw_Disc"),
+                     col.regions = brewer.pal(7,'BrBG')[7:1],
+                     main = "SIR_Global",
+                     par.settings =
+                       list(axis.line = list(col =  'transparent'))),
+              spplot(Carto_Muni,
+                     c("SMR_Raw_Genom_Disc"),
+                     col.regions = brewer.pal(7,'BrBG')[7:1],
+                     main = "SIR_Genom",
+                     par.settings =
+                       list(axis.line = list(col =  'transparent'))),
+              ncol=2)
+```
+
+
+### Modelo BYM de riesgo utilizando los casos de TB con información genómica asociada
+
+```{r, include=TRUE}
+# Estructura de vecindad
+Carto_Muni.nb <- poly2nb(Carto_Muni)
+Carto_Muni$ORDEN <- 1:542
+
+
+# Unión "islas"
+Carto_Muni.nb[[477]] <- as.integer(c(277,312))
+Carto_Muni.nb[[312]] <- as.integer(c(317,382, 477, 517, 523, 538))
+
+Carto_Muni.nb[[364]] <- as.integer(c(317,363,528))
+Carto_Muni.nb[[317]] <- as.integer(c(312,364,517,523))
+
+# Tras esto sacamos los vecinos
+Vecinos <- nb2WB(Carto_Muni.nb)
+```
+
+
+```{r, include=TRUE}
+
+Model_DM_Genom3 <- function(){
+
+  # Modelo
+  for(i in 1:n){
+    O[i]~dpois(mu[i])
+    log(mu[i])<-log(E[i])+m+sdhet*het[i]+sdsp*sp[i]
+    het[i]~dnorm(0,1)
+    R[i]<-exp(m+sdhet*het[i]+sp[i]*sdsp)
+}
+
+  # Iniciales
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,10); sdsp~dunif(0,1)
+  
+  # Exceso de Riesgo
+  for (i in 1:542){
+  P.R1[i]<-step(R[i]-1)}
+  
+}
+
+Datos_Genom3 <- list(O = Obs_Muni_Genom$Freq, 
+                    E = Exp_Muni_AS_Genom$Exp_Muni_AS_Genom, 
+                    adj = Vecinos$adj, 
+                    w = Vecinos$weights, 
+                    num = Vecinos$num, 
+                    n = 542)
+
+Iniciales_Genom <- function() {list(m = rnorm(1,0,0.1), 
+                                    sdhet = runif(1,0,0.1), 
+                                    sdsp = runif(1,0,0.1), 
+                                    het = rnorm(542), 
+                                    sp = rnorm(542))}
+
+Param <- c("m","sdhet","sdsp","R", "P.R1")
+
+set.seed(233)
+Resul_BYM_Genom3 <- bugs(data=Datos_Genom3, 
+                         inits=Iniciales_Genom, 
+                         param=Param, 
+                         model=Model_DM_Genom3, 
+                         n.iter= 5000, 
+                         n.burnin= 1000, 
+                         working.directory ="~/.wine/drive_c/temp/Rtmp", # Comentar si no se ejecuta en Linux
+                         debug=FALSE,
+                         DIC=FALSE)
+
+# Comprobación de los criterios
+max(Resul_BYM_Genom3$summary[1:545,8]) 
+min(Resul_BYM_Genom3$summary[1:545,9]) 
+
+Mean_R_BYM_Genom <- Resul_BYM_Genom3$summary[3+(1:542),1]
+Mean_R_BYM_Genom <- as.data.frame(Mean_R_BYM_Genom)
+#write_xlsx(Mean_R_BYM_Genom,"../results/Mean_R_BYM_Genom.xlsx" )
+
+Mean_PR_BYM_Genom <- Resul_BYM_Genom3$summary[3+(543:1084),1]
+Mean_PR_BYM_Genom <- as.data.frame(Mean_PR_BYM_Genom)
+#write_xlsx(Mean_PR_BYM_Genom,"../results/Mean_PR_BYM_Genom.xlsx" )
+```
+
+```{r, include= FALSE, echo=FALSE}
+# Representación geográfica del riesgo de TB
+# Modelo BYM de riesgo de TB con casos de TB con información genómica
+
+Mean_R_BYM_Genom_Cutoff <-  c(0,0.70,0.80,0.9,1.1,1.2,1.3,Inf)
+Mean_R_BYM_Genom_Disc <- cut(Mean_R_BYM_Genom$Mean_R_BYM_Genom,
+                    breaks = Mean_R_BYM_Genom_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$Mean_R_BYM_Genom_Disc<- Mean_R_BYM_Genom_Disc
+
+spplot(Carto_Muni,
+         c("Mean_R_BYM_Genom_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "sR_BYM_Genom",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+
+```{r, include= FALSE, echo=FALSE}
+# Representación geográfica de la probabilidad de exceso de riesgo
+# Modelo BYM de riesgo de TB con casos de TB con información genómica
+
+Mean_PR_BYM_Genom_Cutoff <-  c(0,0.31,0.51,0.71,0.91,Inf)
+Mean_PR_BYM_Genom_Disc <- cut(Mean_PR_BYM_Genom$Mean_PR_BYM_Genom,
+                    breaks = Mean_PR_BYM_Genom_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$Mean_PR_BYM_Genom_Disc<- Mean_PR_BYM_Genom_Disc
+
+spplot(Carto_Muni,
+         c("Mean_PR_BYM_Genom_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P(R>1) BYM_Genom",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+
+## Modelo BYM binomal para analizar la probabilidad de transmisión de la tuberculosis con datos de epidemiología genómica
+
+Para analizar la transmisión de TB con los datos genómicos, se va a plantea un modelo BYM basado en una distribución binomial:
+
+$$ Trans_i \sim  Binom (p_i, Obs_i),\ i=1,...,542  $$
+
+donde $Trans_i$ es el número de casos de TB dentro de algún cluster de transmisión en cada municipio, $p_i$ es la probabilidad de transmisión de TB en cada municipio según el método de clustering genómico y $Obs_i$ es el número de casos totales de TB notificados en cada municipio.
+
+Para no incluir los datos que no tienen Obs, pero no tener que modificar la cartografía, se crea un vector (*Este_Si*) indicando las posiciones de los municipios que sí tienen Obs en el vector Obs_Muni_Genom. Una vez creado, se utiliza este vector para modelizar solo los datos que sí tienen casos de TB observados: *Trans[Estesi[i]] ~ dbin(p[Estesi[i]], Obs[Estesi[i]])*. Fuera de este bucle se crea otro bucle para sacar los efectos espaciales y heterogéneos de todos los municipios, tengan o no casos observados. Con esto, es posible crear un valor para cada p[i].
+
+
+```{r}
+# Se crea un vector con el número de casos de TB en algún cluster de transmisión
+# según la información recogida mediante epidemiología genómica
+
+Ber_Muni <- as.data.frame(table(Datos_Genom$INE,Datos_Genom$Ber))
+
+Trans_Muni <- Ber_Muni[Ber_Muni$Var2=="SI",]
+Trans_Muni <- left_join(x = Todo_Ine, y = Ber_Muni[Ber_Muni$Var2=="SI",],by="Var1") 
+Trans_Muni[is.na(Trans_Muni)] <- 0
+
+#write_xlsx(Trans_Muni,"../results/Trans_Muni.xlsx" )
+```
+
+```{r}
+# Riesgo de Transmisión global en la CV
+Riesgo_CV <- (sum(Trans_Muni$Freq)/sum(Obs_Muni_Genom$Freq))
+
+# Vector que incluye aquellos municipios que tienen casos de TB 
+# con información genómica
+Este_Si <- which(Obs_Muni_Genom$Freq>0)
+```
+
+
+
+```{r, include=TRUE}
+
+# Modelo
+
+Binom_BYM <- function(){ 
+  for (i in 1:nObs){
+    Trans[Estesi[i]] ~ dbin(p[Estesi[i]], Obs[Estesi[i]])
+    logit(p[Estesi[i]]) <- m+het[Estesi[i]]*sdhet+sp[Estesi[i]]*sdsp
+  }
+  
+
+  for (i in 1:n) {
+    het[i]~dnorm(0,1)
+    Ptrans[i]<-exp(m+het[i]*sdhet+sp[i]*sdsp)/(1+exp(m+het[i]*sdhet+sp[i]*sdsp))
+    # Exceso de transmisión
+    Pexceso[i] <- step(het[i]*sdhet+sp[i]*sdsp)
+  }
+  
+  # Iniciales
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,1); sdsp~dunif(0,1)
+}
+
+Datos_CV_Trans <- list(Obs = Obs_Muni_Genom$Freq, 
+                       Trans = Trans_Muni$Freq, 
+                       adj = Vecinos$adj, 
+                       w = Vecinos$weights, 
+                       num = Vecinos$num, 
+                       Estesi = Este_Si, 
+                       nObs=length(Este_Si), 
+                       n=542)
+
+Iniciales_CV <- function() {
+  list(m = rnorm(1,0,0.1),
+       sdhet = runif(1,0,0.1),
+       sdsp = runif(1,0,0.1),
+       het = rnorm(542), 
+       sp = rnorm(542))
+}
+
+Param <- c("m","sdhet","sdsp","Ptrans", "Pexceso")
+
+set.seed(233) 
+Resul_BYM_Binom <- bugs(data = Datos_CV_Trans, 
+                        inits = Iniciales_CV, 
+                        param = Param, 
+                        model = Binom_BYM, 
+                        n.iter = 10000, 
+                        n.burnin = 2000, 
+                        working.directory = "~/.wine/drive_c/temp/Rtmp", # Comentar esta línea si no se ejecuta en Linux
+                        debug = FALSE,
+                        DIC = FALSE)
+
+# Comprobación de los criterios de validación
+max(Resul_BYM_Binom$summary[1:545,8]) 
+min(Resul_BYM_Binom$summary[1:545,9]) 
+
+# Resumen resultados
+(Resul_BYM_Binom$summary[1:3,]) 
+
+Ptrans_Binom <- Resul_BYM_Binom$mean$Ptrans
+Ptrans_Binom <- as.data.frame(Ptrans_Binom)
+#write_xlsx(Ptrans_Binom,"../results/Ptrans_Binom.xlsx" )
+
+P_Exceso_Binom <- Resul_BYM_Binom$mean$Pexceso
+P_Exceso_Binom <- as.data.frame(P_Exceso_Binom)
+#write_xlsx(P_Exceso_Binom,"../results/P_Exceso_Binom.xlsx" )
+```
+
+
+```{r, include=TRUE, echo=FALSE}
+
+# Representación gráfica Probabilidad de Transmisión de TB
+Ptrans_Binom_Cutoff <-  quantile(Ptrans_Binom$Ptrans_Binom,(0:7)/7)
+Ptrans_Binom_Disc <- cut(Ptrans_Binom$Ptrans_Binom,
+                    breaks = Ptrans_Binom_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$Ptrans_Binom_Disc <- Ptrans_Binom_Disc
+
+spplot(Carto_Muni,
+         c("Ptrans_Binom_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "Probabilidad Transmisión de TB",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+```
+
+```{r, include=TRUE, echo=FALSE}
+# Representación gráfica Probabilidad de Exceso de Transmisión
+P_Exceso_Cutoff <-  quantile(P_Exceso_Binom$P_Exceso_Binom,(0:7)/7)
+P_Exceso_Disc <- cut(P_Exceso_Binom$P_Exceso_Binom,
+                    breaks = P_Exceso_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$P_Exceso_Disc <- P_Exceso_Disc
+
+spplot(Carto_Muni,
+         c("P_Exceso_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "Probabilidad Exceso Transmisión",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+
+```
+
+
+## Modelo BYM binomial para analizar la probabilidad de disponer de información genómica para los casos de TB en cada municipio
+
+Para analizar la cantidad de muestras genómicas sobre el total de muestras se plantea de nuevo un modelo binomial:
+
+$$ Genom_i \sim dbin (p_i, Global_i), \ i = 1,..,542$$
+donde $Genom_i$ hace referencia al número de casos de TB de los que se dispone de información genómica en cada municipio, $Global_i$ representa los casos de TB que tenemos de cada municipio y $p_i$, en este caso, es la probabilidad de que se disponga de info genómica para los casos de TB en cada uno de los municipios.  
+
+
+```{r, include=TRUE }
+# Vector de los municipios que presentan casos de TB
+Este_Si_Genom <- which(Obs_Muni$Freq>0)
+```
+
+```{r, include=TRUE}
+Binom_BYM_Genom <- function(){ 
+  for (i in 1:nObs){
+    Genom[Estesi[i]] ~ dbin(p[Estesi[i]], Global[Estesi[i]])
+    logit(p[Estesi[i]]) <- m+het[Estesi[i]]*sdhet+sp[Estesi[i]]*sdsp
+    
+  }
+  
+
+  for (i in 1:n) {
+    het[i]~dnorm(0,1)
+    PGenom[i]<-exp(m+het[i]*sdhet+sp[i]*sdsp)/(1+exp(m+het[i]*sdhet+sp[i]*sdsp))
+    Pexceso[i] <- step(het[i]*sdhet+sp[i]*sdsp)
+  }
+  
+  # Iniciales
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,1); sdsp~dunif(0,10)
+  
+}
+
+Datos_Trans_Genom <- list(Genom = Obs_Muni_Genom$Freq, 
+                       Global = Obs_Muni$Freq, 
+                       adj = Vecinos$adj, 
+                       w = Vecinos$weights, 
+                       num = Vecinos$num, 
+                       Estesi = Este_Si_Genom, 
+                       nObs=length(Este_Si_Genom), 
+                       n=542)
+
+Iniciales_CV <- function() {
+  list(m = rnorm(1,0,0.1),
+       sdhet = runif(1,0,0.1),
+       sdsp = runif(1,0,0.1),
+       het = rnorm(542), 
+       sp = rnorm(542))
+  }
+Param <- c("m","sdhet","sdsp","PGenom", "Pexceso")
+
+set.seed(233) 
+Resul_Binom_Genom <- bugs(data = Datos_Trans_Genom, 
+                        inits = Iniciales_CV, 
+                        param = Param, 
+                        model = Binom_BYM_Genom, 
+                        n.iter = 10000, 
+                        n.burnin = 2000, 
+                        working.directory = "~/.wine/drive_c/temp/Rtmp", # Comentar esta línea si no se ejecuta en Linux
+                        debug = FALSE,
+                        DIC = FALSE)
+
+# Comprobación de los criterios
+max(Resul_Binom_Genom$summary[1:545,8]) 
+min(Resul_Binom_Genom$summary[1:545,9]) 
+
+P_Genom <- Resul_Binom_Genom$mean$PGenom
+P_Genom <- as.data.frame(P_Genom)
+write_xlsx(P_Genom,"../results/P_Genom.xlsx" )
+
+P_Exceso_Genom <- Resul_Binom_Genom$mean$Pexceso
+P_Exceso_Genom <- as.data.frame(P_Exceso_Genom)
+write_xlsx(P_Exceso_Genom,"../results/P_Exceso_Genom.xlsx" )
+```
+
+
+```{r, include=TRUE, echo=FALSE}
+# Representación geográfica de la probabilidad de que se disponga de info 
+# genómica para los casos de TB en cada uno de los municipios. 
+
+P_Genom_Cutoff <-  quantile(P_Genom$P_Genom,(0:7)/7)
+P_Genom_Disc <- cut(P_Genom$P_Genom,
+                    breaks = P_Genom_Cutoff,
+                     include.lowest = TRUE)
+
+Carto_Muni$P_Genom_Disc <- P_Genom_Disc
+
+spplot(Carto_Muni,
+         c("P_Genom_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "Probabilidad información genómica",
+         par.settings =
+           list(axis.line = list(col =  'transparent')))
+```
+
+## Modelo BYM binomial para analizar la probabilidad de transmisión genómica de TB añadiendo la probabilidad de disponer de información genómica para los casos de TB como covariable
+
+
+```{r, include=TRUE}
+
+Este_Genom <- which(Obs_Muni_Genom$Freq>0)
+Este <- which(Obs_Muni$Freq>0)
+
+Binom_BYM_Cov2 <- function(){ 
+  
+    for (j in 1:nObs){ 
+      
+       #Modelo Genómico
+    Genom[Este[j]] ~ dbin(p[Este[j]], Global[Este[j]])
+    logit(p[Este[j]]) <- m+het[Este[j]]*sdhet+sp[Este[j]]*sdsp
+    
+    }
+  
+  for (j in 1:n) {
+  Var1[j] <- m+het[j]*sdhet+sp[j]*sdsp }
+  
+  for (j in 1:nGenom){ 
+    
+      # Modelo Transmisión
+    Trans[EsteGenom[j]] ~ dbin(pt[EsteGenom[j]], Genom[EsteGenom[j]])
+    logit(pt[EsteGenom[j]]) <- q+het2[EsteGenom[j]]*sdhet2+sp2[EsteGenom[j]]*sdsp2+ 
+                                                        beta1*Var1[EsteGenom[j]]
+     
+    }
+  
+  for (j in 1:n) {
+    het[j]~dnorm(0,1)
+    het2[j]~dnorm(0,1)
+    
+    R[j]<-exp(q+het2[j]*sdhet2+sp2[j]*sdsp2)/(1+exp(q+het2[j]*sdhet2+sp2[j]*sdsp2))
+    Pexceso[j] <- step(het2[j]*sdhet2+sp2[j]*sdsp2)
+    
+  }
+  
+    # Iniciales Genómico
+  sp[1:n]~car.normal(adj[],w[],num[],1)
+  m~dflat()
+  sdhet~dunif(0,1); sdsp~dunif(0,10)
+  
+  # Iniciales
+  sp2[1:n]~car.normal(adj[],w[],num[],1)
+  q~dflat()
+  sdhet2~dunif(0,1); sdsp2~dunif(0,1)
+  beta1 ~ dnorm(0,1)
+  
+  # Asociación covariable
+  Pbeta1 <- step(beta1)
+  
+ 
+}
+
+Datos_BYM_Cov2 <- list(Genom = Obs_Muni_Genom$Freq,
+                       Global = Obs_Muni$Freq,
+                       Trans = Trans_Muni$Freq, 
+                       adj = Vecinos$adj, 
+                       w = Vecinos$weights, 
+                       num = Vecinos$num, 
+                       EsteGenom = Este_Genom, 
+                       Este = Este,
+                       nObs=length(Este),
+                       nGenom =length(Este_Genom),
+                       n=542)
+
+Iniciales_CV2 <- function() {
+  list(m = rnorm(1,0,0.1),
+       q = rnorm(1,0,0.1),
+       sdhet = runif(1,0,0.1),
+       sdhet2 = runif(1,0,0.1),
+       sdsp = runif(1,0,0.1),
+       sdsp2 = runif(1,0,0.1),
+       het = rnorm(542), 
+       het2 = rnorm(542),
+       sp = rnorm(542),
+       sp2 = rnorm(542),
+       beta1 = rnorm(1))
+}
+
+Param <- c( "q","sdhet2","sdsp2","beta1","sdhet","sdsp", "m", "Pbeta1", "R", "Pexceso")
+
+set.seed(233) 
+Resul_BYM_Cov2 <- bugs(data = Datos_BYM_Cov2, 
+                        inits = Iniciales_CV2, 
+                        param = Param, 
+                        model = Binom_BYM_Cov2  , 
+                        n.iter = 15000, 
+                        n.burnin = 2000, 
+                        working.directory = "~/.wine/drive_c/temp/Rtmp", # Comentar esta línea si no se ejecuta en Linux
+                        debug = FALSE,
+                        DIC = FALSE)
+
+# Comprobación de los criterios de validación
+max(Resul_BYM_Cov2$summary[1:547,8]) 
+min(Resul_BYM_Cov2$summary[1:550,9]) 
+
+# Resumen de los resultados
+Resul_BYM_Cov2$summary[1:8,]
+
+P_Cov2 <- Resul_BYM_Cov2$summary[9:550,1]
+P_Cov2 <- as.data.frame(P_Cov2)
+#write_xlsx(P_Cov2,"../results/P_Cov2.xlsx" )
+
+Exceso_Cov2 <- Resul_BYM_Cov2$summary[551:1092,1]
+Exceso_Cov2 <- as.data.frame(Exceso_Cov2)
+#write_xlsx(Exceso_Cov2,"../results/Exceso_Cov2.xlsx" )
+
+Resultado_BYM_Cov2 <- as.data.frame(round(Resul_BYM_Cov2$summary[1:8,],2))
+#write_xlsx(Resultado_BYM_Cov2,"../results/Resultados_BYM_Cov2.xlsx" )
+
+```
+
+```{r, include=TRUE, echo=FALSE}
+P_Cov2_Cutoff <- quantile(P_Cov2$P_Cov2,(0:7)/7)
+P_Cov2_Disc <- cut(P_Cov2$P_Cov2,
+                    breaks = P_Cov2_Cutoff,
+                     include.lowest = TRUE,
+                    right = TRUE)
+
+
+Exceso_Cov2_Cutoff <- quantile(Exceso_Cov2$Exceso_Cov2,(0:7)/7)
+Exceso_Cov2_Disc <- cut(Exceso_Cov2$Exceso_Cov2,
+                    breaks = Exceso_Cov2_Cutoff,
+                     include.lowest = TRUE,
+                    right = TRUE)
+
+Carto_Muni$P_Cov2_Disc <- P_Cov2_Disc
+Carto_Muni$Ptrans_Binom_Disc <- Ptrans_Binom_Disc
+Carto_Muni$P_Genom_Disc <- P_Genom_Disc
+Carto_Muni$Exceso_Cov2_Disc <- Exceso_Cov2_Disc
+
+grid.arrange(spplot(Carto_Muni,
+         c("Ptrans_Binom_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "Probabilidad Transmisión de TB",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         spplot(Carto_Muni,
+         c("P_Cov2_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión de TB Covariable",
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         ncol=2
+         )
+
+grid.arrange(spplot(Carto_Muni,
+         c("P_Cov2_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P. Transmisión de TB Covariable",
+         main.cex=0.7,
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),spplot(Carto_Muni,
+         c("Exceso_Cov2_Disc"),
+         col.regions = brewer.pal(7,'BrBG')[7:1],
+         main = "P.Exceso Transmisión Covariable",
+           main.cex=0.7,
+         par.settings =
+           list(axis.line = list(col =  'transparent'))),
+         ncol=2
+         )
+
+
+```
+
+```{r}
+# Resumen de los municipios con P transmisión más altas
+
+R_Cov_P.43 <- as.data.frame(Carto_Muni)[P_Cov2$P_Cov2>0.43,]
+Obs_Muni_P.43 <- Obs_Muni_Genom[P_Cov2$P_Cov2>0.43,]  
+Exp_Muni_P.43 <- as.data.frame(Exp_Muni_AS_Genom[P_Cov2$P_Cov2>0.43,])
+Trans_Muni_P.43 <-  as.data.frame(Trans_Muni[P_Cov2$P_Cov2>0.43,])
+Prob_Trans_p.43 <- as.data.frame(P_Cov2)[P_Cov2$P_Cov2>0.43,]
+
+Pob_P <- apply(as.matrix(POPT[P_Cov2>0.43,]),1,sum)
+Pob_P <- as.data.frame (Pob_P)
+Mun_P.43_PobP7 <- Pob_P$Pob_P/7
+
+Mun_P.43_Todo <- data.frame("NOMBRE_MUNI" = R_Cov_P.43$NOMBRE_MUNI,
+                            "PROV"= R_Cov_P.43$ID_PRO,
+                            "OBS.GENOM" = Obs_Muni_P.43$Freq, 
+                            "TRANS" = Trans_Muni_P.43$Freq,
+                            "PROB.TRANS" = round(Prob_Trans_p.43,3))
+
+Mun_P.43_Todo[order(Mun_P.43_Todo$PROB.TRANS, Mun_P.43_Todo$PROV, Mun_P.43_Todo$NOMBRE_MUNI), ]
+Mun_P.43_Todo <- Mun_P.43_Todo[order(Mun_P.43_Todo$PROB.TRANS, decreasing = TRUE),]
+
+Mun_P.43_Todo <- Mun_P.43_Todo[,c(1,5,3,4)]
+#write_xlsx(Mun_P.43_Todo, "../results/Mun_P.43_Todo.xlsx")
+
+
+# Resumen de los municipios con P de Esceso de transmisión más altas
+
+Exceso_Cov_0.7 <- as.data.frame(Carto_Muni)[Exceso_Cov2$Exceso_Cov2>0.70,]
+Obs_Exceso_Cov_0.7 <- Obs_Muni_Genom[Exceso_Cov2$Exceso_Cov2>0.70,]
+Trans_Exceso_Cov_0.7 <- as.data.frame(Trans_Muni[Exceso_Cov2$Exceso_Cov2>0.70,])
+Prob_Exceso_Cov_0.7 <- as.data.frame(Exceso_Cov2)[Exceso_Cov2$Exceso_Cov2>0.70,]
+
+Pob_P <- apply(as.matrix(POPT[Exceso_Cov2$Exceso_Cov2>0.70,]),1,sum)
+Pob_P <- as.data.frame (Pob_P)
+Exceso_Cov_0.7_PobP7 <- Pob_P$Pob_P/7
+
+Exceso_Cov_0.7_Todo <-  data.frame("NOMBRE_MUNI" = Exceso_Cov_0.7$NOMBRE_MUNI,
+                                   "PROV" =Exceso_Cov_0.7$ID_PRO,
+                            "OBS.GENOM" = Obs_Exceso_Cov_0.7$Freq, 
+                            "TRANS" = Trans_Exceso_Cov_0.7$Freq,
+                            "PROB.EXCESO" = round(Prob_Exceso_Cov_0.7,3))
+
+
+Exceso_Cov_0.7_Todo[order(Exceso_Cov_0.7_Todo$PROB.EXCESO, Exceso_Cov_0.7_Todo$PROV, Exceso_Cov_0.7_Todo$NOMBRE_MUNI), ]
+Exceso_Cov_0.7_Todo <- Exceso_Cov_0.7_Todo[order(Exceso_Cov_0.7_Todo$PROB.EXCESO, decreasing = TRUE),]
+
+Exceso_Cov_0.7_Todo <- Exceso_Cov_0.7_Todo[,c(1,5,3,4)]
+#write_xlsx(Exceso_Cov_0.7_Todo, "../results/Exceso_Cov_0.7_Todo.xlsx")
+```
+
+
+
+```{r, include=TRUE, echo=FALSE, out.width="70%", fig.align='center'}
+# Relación entre la probabilidad de tener información genómica y la 
+# probabilidad de transmisión de TB
+
+cor(P_Genom$P_Genom, Ptrans_Binom$Ptrans_Binom)
+plot(P_Genom$P_Genom, Ptrans_Binom$Ptrans_Binom, main="Relación entre Prob Genom y Prob Trans", xlab="Prob_Genom", ylab="Prob_Trans")
+```
+
